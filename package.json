@@ -1,0 +1,8 @@
+{
+  "name": "aetasham-wallah-ai",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openai": "latest"
+  }
+}
