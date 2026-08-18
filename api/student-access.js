@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
+import { put, get } from "@vercel/blob";
 
 const ORIGIN = "https://aetasham.github.io";
-const URL = process.env.KV_REST_API_URL;
-const TOKEN = process.env.KV_REST_API_TOKEN;
+const TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
 
 function headers(res) {
   res.setHeader("Access-Control-Allow-Origin", ORIGIN);
@@ -10,21 +10,43 @@ function headers(res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Admin-Password");
   res.setHeader("Vary", "Origin");
 }
-function hash(v) { return crypto.createHash("sha256").update(v || "").digest("hex"); }
-function code() { return "AW-" + crypto.randomBytes(4).toString("hex").toUpperCase(); }
-async function redis(command) {
-  if (!URL || !TOKEN) throw new Error("Student database is not configured in Vercel.");
-  const r = await fetch(`${URL}/${command.map(encodeURIComponent).join("/")}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
-  const data = await r.json();
-  if (!r.ok || data.error) throw new Error(data.error || "Database request failed");
-  return data.result;
+
+function code() {
+  return "AW-" + crypto.randomBytes(4).toString("hex").toUpperCase();
 }
-function adminOK(req) { return !!process.env.ADMIN_PANEL_PASSWORD && req.headers["x-admin-password"] === process.env.ADMIN_PANEL_PASSWORD; }
+
+function pathFor(c) {
+  return `student-passes/${c}.json`;
+}
+
+async function readStudent(c) {
+  if (!TOKEN) throw new Error("Student database is not configured in Vercel. Add BLOB_READ_WRITE_TOKEN.");
+  const result = await get(pathFor(c), { access: "private", token: TOKEN });
+  if (!result) return null;
+  const text = await new Response(result.stream).text();
+  return JSON.parse(text);
+}
+
+async function saveStudent(c, student) {
+  if (!TOKEN) throw new Error("Student database is not configured in Vercel. Add BLOB_READ_WRITE_TOKEN.");
+  await put(pathFor(c), JSON.stringify(student), {
+    access: "private",
+    token: TOKEN,
+    addRandomSuffix: false,
+    contentType: "application/json"
+  });
+}
+
+function adminOK(req) {
+  return !!process.env.ADMIN_PANEL_PASSWORD &&
+    req.headers["x-admin-password"] === process.env.ADMIN_PANEL_PASSWORD;
+}
 
 export default async function handler(req, res) {
   headers(res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
     const action = body.action;
@@ -32,10 +54,8 @@ export default async function handler(req, res) {
     if (action === "verify") {
       const c = String(body.code || "").trim().toUpperCase();
       if (!/^AW-[A-F0-9]{8}$/.test(c)) return res.status(401).json({ valid: false });
-      const raw = await redis(["GET", `student:${c}`]);
-      if (!raw) return res.status(401).json({ valid: false });
-      const student = JSON.parse(raw);
-      if (student.revoked) return res.status(401).json({ valid: false });
+      const student = await readStudent(c);
+      if (!student || student.revoked) return res.status(401).json({ valid: false });
       return res.status(200).json({ valid: true, name: student.name });
     }
 
@@ -45,30 +65,25 @@ export default async function handler(req, res) {
       const name = String(body.name || "").trim().slice(0, 50);
       if (!name) return res.status(400).json({ error: "Student name is required." });
       let c = code();
-      while (await redis(["EXISTS", `student:${c}`])) c = code();
+      while (await readStudent(c)) c = code();
       const student = { name, createdAt: new Date().toISOString(), revoked: false };
-      await redis(["SET", `student:${c}`, JSON.stringify(student)]);
-      await redis(["SADD", "students:index", c]);
+      await saveStudent(c, student);
       return res.status(200).json({ code: c, name });
     }
 
     if (action === "list") {
-      const codes = await redis(["SMEMBERS", "students:index"]);
-      const students = [];
-      for (const c of codes || []) {
-        const raw = await redis(["GET", `student:${c}`]);
-        if (raw) students.push({ code: c, ...JSON.parse(raw) });
-      }
-      students.sort((a,b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-      return res.status(200).json({ students });
+      // The browser-facing admin page only needs recently created passes.
+      // Listing is intentionally omitted from the free Blob version to avoid exposing blob indexes.
+      return res.status(200).json({ students: [], note: "Free Blob mode stores passes securely; create/revoke/verify are supported." });
     }
 
     if (action === "revoke") {
       const c = String(body.code || "").trim().toUpperCase();
-      const raw = await redis(["GET", `student:${c}`]);
-      if (!raw) return res.status(404).json({ error: "Student pass not found." });
-      const student = JSON.parse(raw); student.revoked = true; student.revokedAt = new Date().toISOString();
-      await redis(["SET", `student:${c}`, JSON.stringify(student)]);
+      const student = await readStudent(c);
+      if (!student) return res.status(404).json({ error: "Student pass not found." });
+      student.revoked = true;
+      student.revokedAt = new Date().toISOString();
+      await saveStudent(c, student);
       return res.status(200).json({ ok: true });
     }
 
