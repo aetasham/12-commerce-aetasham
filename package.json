@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "openai": "latest"
+    "openai": "latest",
+    "@vercel/blob": "latest"
   }
 }
