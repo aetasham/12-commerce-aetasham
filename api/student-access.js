@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { put, get } from "@vercel/blob";
+import { put, get, list } from "@vercel/blob";
 
 const ORIGIN = "https://aetasham.github.io";
 const TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
@@ -37,6 +37,37 @@ async function saveStudent(c, student) {
   });
 }
 
+async function listStudents() {
+  if (!TOKEN) throw new Error("Student database is not configured in Vercel. Add BLOB_READ_WRITE_TOKEN.");
+
+  const result = await list({ prefix: "student-passes/", token: TOKEN });
+  const students = [];
+
+  for (const blob of result.blobs || []) {
+    const match = blob.pathname.match(/^student-passes\/(AW-[A-F0-9]{8})\.json$/i);
+    if (!match) continue;
+
+    const c = match[1].toUpperCase();
+    try {
+      const student = await readStudent(c);
+      if (student) {
+        students.push({
+          code: c,
+          name: student.name,
+          createdAt: student.createdAt,
+          revoked: !!student.revoked,
+          revokedAt: student.revokedAt || null
+        });
+      }
+    } catch (e) {
+      console.error("Failed to read student pass", c, e);
+    }
+  }
+
+  students.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  return students;
+}
+
 function adminOK(req) {
   return !!process.env.ADMIN_PANEL_PASSWORD &&
     req.headers["x-admin-password"] === process.env.ADMIN_PANEL_PASSWORD;
@@ -72,9 +103,8 @@ export default async function handler(req, res) {
     }
 
     if (action === "list") {
-      // The browser-facing admin page only needs recently created passes.
-      // Listing is intentionally omitted from the free Blob version to avoid exposing blob indexes.
-      return res.status(200).json({ students: [], note: "Free Blob mode stores passes securely; create/revoke/verify are supported." });
+      const students = await listStudents();
+      return res.status(200).json({ students });
     }
 
     if (action === "revoke") {
